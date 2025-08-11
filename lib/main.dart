@@ -55,6 +55,7 @@ class _MainScreenState extends State<MainScreen> {
   // macOS 권한 보조 상태
   bool _pickedFolder = false;   // 폴더 선택 흐름인지 여부
   String? _grantedDir;          // 사용자가 쓰기 허용한 폴더 경로
+  bool _isRequestingPermission = false; // 권한 요청 중인지 여부
 
   @override
   void initState() {
@@ -75,6 +76,7 @@ class _MainScreenState extends State<MainScreen> {
       _isProcessing = false;
       _pickedFolder = false;
       _grantedDir = null;
+      _isRequestingPermission = false;
     });
   }
 
@@ -97,11 +99,17 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   // --- 유틸: 상단 진행 상태 문구 갱신 ---
-  // - 파일 유무, 버전 선택 유무에 따라 1/2/3단계 문구 표시
+  // - 파일 유무, 권한 상태, 버전 선택 유무에 따라 1/2/3단계 문구 표시
   void _updateStatus() {
     if (_filesToConvert.isEmpty) {
       _status = '1. .als 파일 또는 폴더를 선택하세요.';
     } else {
+      // macOS 단일 파일: 권한 상태 확인
+      if (Platform.isMacOS && !_pickedFolder && _grantedDir == null) {
+        _status = '권한이 필요합니다. 폴더 선택 대화상자에서 원본 폴더를 다시 선택해주세요.';
+        return;
+      }
+      
       if (_selectedMinorVersion == null || _selectedPatchVersion == null) {
         _status = '2. 목표 Ableton 11 버전을 선택하세요.';
       } else {
@@ -112,6 +120,7 @@ class _MainScreenState extends State<MainScreen> {
 
   // --- 파일 선택(단일) ---
   // - 기존 목록을 비우고 단일 파일로 대체
+  // - macOS: 자동으로 원본 폴더 쓰기 권한 요청
   Future<void> _selectFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -120,25 +129,30 @@ class _MainScreenState extends State<MainScreen> {
 
     if (result != null && result.files.single.path != null) {
       final selectedPath = result.files.single.path!;
+      final parentDir = p.dirname(selectedPath);
+      
       setState(() {
         _pickedFolder = false;
         _filesToConvert
           ..clear()
           ..add(File(selectedPath));
+        _status = '파일 선택됨. 폴더 권한을 확인하는 중...';
       });
 
-      // macOS: 같은 폴더 쓰기 권한 요청
+      // macOS: 권한 요청 전 안내 메시지 표시
       if (Platform.isMacOS) {
-        final parent = p.dirname(selectedPath);
-        final dir = await FilePicker.platform.getDirectoryPath(
-          dialogTitle: '원본 폴더 쓰기 권한을 부여하세요',
-          initialDirectory: parent,
-        );
-        if (dir != null && p.equals(p.normalize(dir), p.normalize(parent))) {
-          _grantedDir = dir; // 같은 폴더로 승인됨
-        } else {
-          _grantedDir = null; // 승인 실패 시 변환 단계에서 재요청
-        }
+        setState(() {
+          _status = '파일 선택 완료!\n\n'
+              '선택된 파일: ${p.basename(selectedPath)}\n'
+              '저장 위치: ${p.basename(parentDir)} 폴더\n\n'
+              '⚠️  **macOS 권한이 필요합니다** ⚠️\n\n'
+              '아래 "권한 요청" 버튼을 눌러 원본 폴더에 쓰기 권한을 부여해주세요.';
+        });
+      } else {
+        // Windows/Linux: 권한 문제 없음
+        setState(() {
+          _status = '파일 선택됨. 이제 버전을 선택하세요.';
+        });
       }
 
       _updateStatus();
@@ -178,6 +192,52 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  // --- macOS 권한 요청 처리 ---
+  // - 사용자가 권한 요청 버튼을 클릭했을 때 실행
+  Future<void> _requestFolderPermission() async {
+    if (_filesToConvert.isEmpty) return;
+    
+    final selectedPath = _filesToConvert.first.path;
+    final parentDir = p.dirname(selectedPath);
+    
+    setState(() {
+      _isRequestingPermission = true;
+      _status = '폴더 선택 대화상자가 열립니다...\n\n'
+          '원본 폴더(${p.basename(parentDir)})를 선택해주세요.';
+    });
+
+    try {
+      final dir = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '원본 폴더에 쓰기 권한을 부여하세요',
+        initialDirectory: parentDir,
+      );
+      
+      if (dir != null && p.equals(p.normalize(dir), p.normalize(parentDir))) {
+        _grantedDir = dir;
+        setState(() {
+          _status = '권한 승인됨! 이제 버전을 선택하세요.';
+        });
+      } else {
+        _grantedDir = null;
+        setState(() {
+          _status = '권한이 거부되었습니다.\n\n'
+              '아래 "권한 요청" 버튼을 다시 눌러 원본 폴더를 선택해주세요.';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _status = '권한 요청 중 오류가 발생했습니다: $e\n\n'
+            '다시 시도해주세요.';
+      });
+    } finally {
+      setState(() {
+        _isRequestingPermission = false;
+      });
+    }
+    
+    _updateStatus();
+  }
+
 
   // --- 변환 실행 ---
   // - 선택된 모든 파일에 대해 압축 해제 → XML 수정 → 재압축
@@ -209,24 +269,7 @@ class _MainScreenState extends State<MainScreen> {
         final newFileName = '${p.basenameWithoutExtension(file.path)}_downgraded.als';
         final newPath = p.join(parentDir, newFileName);
 
-        // macOS 단일 파일 흐름: 동일 폴더 쓰기 권한 확인 및 필요 시 재요청
-        if (Platform.isMacOS && !_pickedFolder) {
-          final hasGrant = _grantedDir != null &&
-              p.equals(p.normalize(_grantedDir!), p.normalize(parentDir));
-          if (!hasGrant) {
-            final dir = await FilePicker.platform.getDirectoryPath(
-              dialogTitle: '저장할 원본 폴더를 선택하세요',
-              initialDirectory: parentDir,
-            );
-            if (dir == null || !p.equals(p.normalize(dir), p.normalize(parentDir))) {
-              // 같은 폴더로 승인되지 않으면 실패 처리
-              failCount++;
-              continue;
-            }
-            _grantedDir = dir;
-          }
-        }
-
+        // 권한은 이미 _selectFile에서 확인했으므로 바로 저장
         await File(newPath).writeAsBytes(convertedBytes);
         successCount++;
       } catch (e) {
@@ -252,7 +295,9 @@ class _MainScreenState extends State<MainScreen> {
     final bool canConvert = _filesToConvert.isNotEmpty &&
         _selectedMinorVersion != null &&
         _selectedPatchVersion != null &&
-        !_isProcessing;
+        !_isProcessing &&
+        // macOS 단일 파일: 권한 확인 필요
+        !(Platform.isMacOS && !_pickedFolder && _grantedDir == null);
 
     return Scaffold(
       appBar: AppBar(
@@ -310,6 +355,72 @@ class _MainScreenState extends State<MainScreen> {
                     : '선택된 파일 없음',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
+              
+              // --- macOS 권한 상태 표시 ---
+              if (Platform.isMacOS && _filesToConvert.isNotEmpty && !_pickedFolder)
+                Container(
+                  margin: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: _grantedDir != null ? Colors.green.shade50 : Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _grantedDir != null ? Colors.green : Colors.orange,
+                      width: 2,
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _grantedDir != null ? Icons.check_circle : Icons.warning,
+                            color: _grantedDir != null ? Colors.green : Colors.orange,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _grantedDir != null 
+                                ? '폴더 권한 승인됨' 
+                                : '폴더 권한 필요',
+                            style: TextStyle(
+                              color: _grantedDir != null ? Colors.green.shade700 : Colors.orange.shade700,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ],
+                      ),
+                      
+                      // 권한이 필요한 경우 권한 요청 버튼 표시
+                      if (_grantedDir == null) ...[
+                        const SizedBox(height: 12),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('권한 요청'),
+                          onPressed: _isRequestingPermission ? null : _requestFolderPermission,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange.shade600,
+                            foregroundColor: Colors.white,
+                            minimumSize: const Size(120, 36),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '파일 작성에 필요한 권한이 부여되지 않았습니다! **원본 폴더를 다시 선택해주세요.**',
+                          style: TextStyle(
+                            color: Colors.orange.shade800,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              
               const SizedBox(height: 30),
 
               // --- 버전 선택 영역 ---
