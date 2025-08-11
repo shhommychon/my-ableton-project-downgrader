@@ -1,2 +1,3 @@
-# brew install imagemagick
+# brew install imagemagick (macos)
+# choco install imagemagick (windows)
 magick macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_16.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_32.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_48.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_64.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_128.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_256.png macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_512.png windows/runner/resources/app_icon.ico
