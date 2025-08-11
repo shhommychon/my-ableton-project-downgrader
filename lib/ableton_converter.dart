@@ -2,6 +2,73 @@ import 'dart:convert';
 import 'package:archive/archive.dart';
 import 'package:xml/xml.dart';
 
+/// 버전별 변환 룰을 정의하는 클래스
+class ConversionRule {
+  final String description;
+  final String xpathSelector;
+  final String attributeName;
+  final dynamic Function(String) converter;
+  final bool Function(XmlElement)? condition;
+
+  ConversionRule({
+    required this.description,
+    required this.xpathSelector,
+    required this.attributeName,
+    required this.converter,
+    this.condition,
+  });
+}
+
+/// Ableton Live 11 호환성을 위한 변환 룰북
+class Live11CompatibilityRules {
+  static final List<ConversionRule> rules = [
+    // Oversampling: bool -> int (true -> 1, false -> 0)
+    ConversionRule(
+      description: 'Oversampling: bool -> int',
+      xpathSelector: '//Oversampling',
+      attributeName: 'Value',
+      converter: (value) {
+        if (value.toLowerCase() == 'true') return '1';
+        if (value.toLowerCase() == 'false') return '0';
+        return value; // 이미 숫자인 경우 그대로 유지
+      },
+    ),
+    
+    // 다른 자료형 변환이 필요한 태그들도 여기에 추가 가능
+    // 예: <SomeOtherTag Value="aBc"/> -> <SomeOtherTag Value="DeF"/>
+  ];
+
+  /// 모든 룰을 적용합니다
+  static void applyAllRules(XmlDocument document) {
+    for (final rule in rules) {
+      _applyRule(document, rule);
+    }
+  }
+
+  /// 개별 룰을 적용합니다
+  static void _applyRule(XmlDocument document, ConversionRule rule) {
+    try {
+      final elements = document.findAllElements(rule.xpathSelector.split('/').last);
+      
+      for (final element in elements) {
+        // 조건이 있으면 확인
+        if (rule.condition != null && !rule.condition!(element)) {
+          continue;
+        }
+
+        final attribute = element.getAttribute(rule.attributeName);
+        if (attribute != null) {
+          final convertedValue = rule.converter(attribute);
+          element.setAttribute(rule.attributeName, convertedValue.toString());
+        }
+      }
+    } catch (e) {
+      // 개별 룰 적용 실패 시 로그만 남기고 계속 진행
+      print('경고: Live 11 호환성 룰북 내 "${rule.description}" 규칙을 적용하는데 실패했습니다: $e');
+    }
+  }
+}
+
 class AbletonConverter {
   /// `.als` 파일 데이터와 목표 버전을 받아 변환된 파일 데이터를 반환합니다.
   ///
@@ -44,6 +111,9 @@ class AbletonConverter {
         parent.children[index] = newElement;
       }
     }
+
+    // 3C. Live 11 호환성을 위한 룰북 적용
+    Live11CompatibilityRules.applyAllRules(document);
     
     final modifiedXmlString = document.toXmlString(pretty: true);
 
